@@ -1,0 +1,5 @@
+spring:
+  profiles:
+    active: test
+etcd:
+  endpoints: http://localhost:2379
