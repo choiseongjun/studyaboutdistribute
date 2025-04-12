@@ -1,2 +1,5 @@
 etcd:
   endpoints: http://localhost:2379
+  test:
+    database:
+      replace: none
