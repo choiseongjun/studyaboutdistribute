@@ -39,10 +39,18 @@ spring:
     consumer:
       group-id: order-group
       auto-offset-reset: earliest
-      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
-      properties:
-        spring.json.trusted.packages: "com.seongjun.distributesystem.dto"
+      enable-auto-commit: true
+      auto-commit-interval: 1000
+      max-poll-records: 1000
+      fetch-max-bytes: 52428800
+      max-partition-fetch-bytes: 1048576
+      session-timeout-ms: 30000
+      heartbeat-interval-ms: 10000
+    listener:
+      type: batch
+      concurrency: 10
+      poll-timeout: 3000
+      ack-mode: batch
 
   datasource:
     url: jdbc:postgresql://localhost:5432/ordertest
