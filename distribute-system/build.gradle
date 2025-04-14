@@ -1,16 +1,14 @@
 plugins {
 	id 'java'
-	id 'org.springframework.boot' version '3.4.4'
-	id 'io.spring.dependency-management' version '1.1.7'
+	id 'org.springframework.boot' version '3.2.3'
+	id 'io.spring.dependency-management' version '1.1.4'
 }
 
 group = 'com.seongjun'
 version = '0.0.1-SNAPSHOT'
 
 java {
-	toolchain {
-		languageVersion = JavaLanguageVersion.of(21)
-	}
+	sourceCompatibility = '21'
 }
 
 configurations {
@@ -25,12 +23,20 @@ repositories {
 
 dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-web'
-	compileOnly 'org.projectlombok:lombok'
+	implementation 'org.springframework.boot:spring-boot-starter-actuator'
+	implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+	implementation 'org.springframework.kafka:spring-kafka'
+	implementation 'io.micrometer:micrometer-registry-prometheus'
+	implementation 'org.projectlombok:lombok'
+	implementation 'io.etcd:jetcd-core:0.7.7'
+	implementation 'com.fasterxml.jackson.core:jackson-databind'
+	implementation 'org.springframework.boot:spring-boot-starter-validation'
+	implementation 'org.postgresql:postgresql'
+	
 	annotationProcessor 'org.projectlombok:lombok'
+	
 	testImplementation 'org.springframework.boot:spring-boot-starter-test'
-	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
-	// https://mvnrepository.com/artifact/io.etcd/jetcd-core
-	implementation("io.etcd:jetcd-core:0.8.5")
+	testImplementation 'org.springframework.kafka:spring-kafka-test'
 	testImplementation 'org.mockito:mockito-core:3.12.4'
 	testImplementation 'org.mockito:mockito-junit-jupiter:3.12.4'
 }

@@ -1,0 +1,11 @@
+apiVersion: 1
+
+datasources:
+  - name: k6-summary
+    type: simple-json-datasource
+    access: proxy
+    url: http://k6:6565
+    jsonData:
+      keepCookies: []
+    secureJsonData: {}
+    editable: true

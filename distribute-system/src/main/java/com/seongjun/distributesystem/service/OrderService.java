@@ -1,71 +1,77 @@
 package com.seongjun.distributesystem.service;
 
-import com.seongjun.distributesystem.config.CircuitBreaker;
-import com.seongjun.distributesystem.config.CircuitBreakerOpenException;
-import com.seongjun.distributesystem.utils.EtcdDistributedLock;
+import com.seongjun.distributesystem.dto.OrderRequest;
+import com.seongjun.distributesystem.dto.OrderResponse;
+import com.seongjun.distributesystem.kafka.KafkaOrderProducer;
+import com.seongjun.distributesystem.model.Order;
+import com.seongjun.distributesystem.repository.OrderRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
-import java.util.UUID;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Service
 public class OrderService {
-
-    private final CircuitBreaker circuitBreaker;
-    private final EtcdDistributedLock lock;
-    private static final int MAX_RETRIES = 3;
-    private static final long RETRY_DELAY_MS = 100;
+    private static final Logger logger = LoggerFactory.getLogger(OrderService.class);
     private static final int MAX_FAILURES = 3;
-    private static final long RESET_TIMEOUT = 30000; // 30초
+    private final AtomicInteger failureCount = new AtomicInteger(0);
+    private volatile boolean circuitBreakerOpen = false;
 
-    public OrderService(EtcdDistributedLock lock) {
-        this.lock = lock;
-        this.circuitBreaker = new CircuitBreaker(MAX_FAILURES, RESET_TIMEOUT);
-    }
+    @Autowired
+    private KafkaOrderProducer orderProducer;
 
-    public String processOrder(String orderId) {
-        // 회로 차단기 상태 확인
-        if (!circuitBreaker.allowRequest()) {
-            System.out.println("Circuit breaker is open, rejecting request for order: " + orderId);
-            throw new CircuitBreakerOpenException();
+    @Autowired
+    private OrderRepository orderRepository;
+
+    public OrderResponse processOrder(OrderRequest orderRequest) {
+        if (circuitBreakerOpen) {
+            logger.warn("Circuit breaker is open, rejecting request for order: {}", orderRequest.getOrderId());
+            return OrderResponse.builder()
+                    .orderId(orderRequest.getOrderId())
+                    .status("REJECTED")
+                    .message("Circuit breaker is open")
+                    .build();
         }
 
-        // 락 키 생성 (주문ID 기반)
-        String lockKey = "order:" + orderId;
-        
-        // 재시도 로직
-        for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
-            try {
-                // 락을 획득하고 비즈니스 로직 실행
-                String result = lock.executeWithLock(lockKey, 10, 20, () -> {
-                    // 작업 시뮬레이션 (시간 단축)
-                    try {
-                        Thread.sleep(100); // 100ms로 단축
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                    }
-                    return "Order " + orderId + " processed by " + UUID.randomUUID();
-                });
-                
-                // 성공 시 회로 차단기 상태 리셋
-                circuitBreaker.recordSuccess();
-                return result;
-            } catch (Exception e) {
-                System.out.println("Failed to process order " + orderId + " on attempt " + (attempt + 1) + ": " + e.getMessage());
-                // 실패 시 회로 차단기에 기록
-                circuitBreaker.recordFailure();
-                if (attempt == MAX_RETRIES - 1) {
-                    throw e;
-                }
-                try {
-                    TimeUnit.MILLISECONDS.sleep(RETRY_DELAY_MS * (attempt + 1));
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    throw new RuntimeException("Interrupted during retry", ie);
-                }
+        try {
+            CompletableFuture<Void> future = orderProducer.sendOrder(orderRequest)
+                    .thenAccept(result -> {
+                        Order order = new Order();
+                        order.setOrderId(orderRequest.getOrderId());
+                        order.setProductId(orderRequest.getProductId());
+                        order.setQuantity(orderRequest.getQuantity());
+                        order.setUserId(orderRequest.getUserId());
+                        order.setStatus("PROCESSING");
+                        orderRepository.save(order);
+                    });
+
+            future.get(); // Wait for the operation to complete
+
+            failureCount.set(0); // Reset failure count on success
+            return OrderResponse.builder()
+                    .orderId(orderRequest.getOrderId())
+                    .status("ACCEPTED")
+                    .message("Order processed successfully")
+                    .build();
+
+        } catch (Exception e) {
+            int failures = failureCount.incrementAndGet();
+            logger.error("Failed to process order: {}, failure count: {}", orderRequest.getOrderId(), failures, e);
+
+            if (failures >= MAX_FAILURES) {
+                circuitBreakerOpen = true;
+                logger.warn("Circuit breaker opened after {} failures", failures);
             }
+
+            return OrderResponse.builder()
+                    .orderId(orderRequest.getOrderId())
+                    .status("FAILED")
+                    .message("Failed to process order: " + e.getMessage())
+                    .build();
         }
-        throw new RuntimeException("Failed to process order after " + MAX_RETRIES + " attempts");
     }
 }
 

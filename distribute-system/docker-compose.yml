@@ -1,0 +1,83 @@
+version: "3"
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+
+  k6:
+    image: grafana/k6
+    volumes:
+      - ./k6:/scripts
+    command: run --out experimental-prometheus-rw=http://prometheus:9090/api/v1/write --out json=/scripts/summary.json /scripts/order-service-test.js
+    environment:
+      - K6_PROMETHEUS_RW_SERVER_URL=http://prometheus:9090/api/v1/write
+      - K6_PROMETHEUS_RW_TREND_AS_NATIVE_HISTOGRAM=false
+      - K6_PROMETHEUS_RW_PUSH_INTERVAL=5s
+      - K6_PROMETHEUS_RW_BATCH_SIZE=100
+      - K6_PROMETHEUS_RW_MAX_BATCH_SIZE=1000
+    depends_on:
+      - prometheus
+
+  k6-summary-server:
+    image: python:3.9-slim
+    volumes:
+      - ./k6:/app
+    command: >
+      sh -c "pip install flask && 
+             python -c 'from flask import Flask, send_file; 
+                      app = Flask(__name__); 
+                      @app.route(\"/\") 
+                      def serve_file(): 
+                          return send_file(\"/app/summary.json\"); 
+                      app.run(host=\"0.0.0.0\", port=6565)'"
+    ports:
+      - "6565:6565"
+    depends_on:
+      - k6
+
+  prometheus:
+    image: prom/prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-remote-write-receiver"
+      - "--storage.tsdb.retention.time=15d"
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      - prometheus
+      - k6-summary-server

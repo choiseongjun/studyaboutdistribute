@@ -5,8 +5,7 @@ import io.etcd.jetcd.Client;
 import io.etcd.jetcd.Lease;
 import io.etcd.jetcd.Lock;
 import io.etcd.jetcd.lock.LockResponse;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -18,16 +17,15 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
+@Slf4j
 @Component
 public class EtcdDistributedLock implements DisposableBean {
-
-    private static final Logger logger = LoggerFactory.getLogger(EtcdDistributedLock.class);
     private final Client client;
     private final Lock lockClient;
     private final Lease leaseClient;
 
     public EtcdDistributedLock(@Value("${etcd.endpoints:http://localhost:2379}") String endpoints) {
-        logger.info("Initializing EtcdDistributedLock with endpoints: {}", endpoints);
+        log.info("Initializing EtcdDistributedLock with endpoints: {}", endpoints);
         this.client = Client.builder()
                 .endpoints(endpoints.split(","))
                 .build();
@@ -39,71 +37,83 @@ public class EtcdDistributedLock implements DisposableBean {
      * 분산락을 획득하고 작업을 실행한 후 락을 해제합니다.
      *
      * @param lockKey  락 키
-     * @param timeout  락 획득 타임아웃 (초)
-     * @param leaseTime 리스 타임 (초)
+     * @param ttlSeconds 락 유지 시간 (초)
+     * @param maxRetries 최대 재시도 횟수
      * @param supplier 락을 획득한 상태에서 실행할 작업
      * @return 작업 결과
      */
-    public <T> T executeWithLock(String lockKey, long timeout, long leaseTime, Supplier<T> supplier) {
+    public <T> T executeWithLock(String lockKey, int ttlSeconds, int maxRetries, Supplier<T> supplier) {
         ByteSequence lockKeyBS = ByteSequence.from(lockKey, StandardCharsets.UTF_8);
         long leaseId = 0;
         ByteSequence lockOwner = null;
+        int retryCount = 0;
 
-        try {
-            logger.info("Attempting to acquire lock: {} with timeout: {}s, leaseTime: {}s", lockKey, timeout, leaseTime);
-            
-            // 리스 생성 (타임아웃을 별도로 설정)
-            leaseId = leaseClient.grant(leaseTime).get(5, TimeUnit.SECONDS).getID();
-            logger.info("Lease granted with ID: {} for lock: {}", leaseId, lockKey);
-
-            // 락 획득 시도
-            CompletableFuture<LockResponse> lockFuture = lockClient.lock(lockKeyBS, leaseId);
-            LockResponse lockResponse = lockFuture.get(timeout, TimeUnit.SECONDS);
-            lockOwner = lockResponse.getKey();
-            logger.info("Lock acquired: {} with key: {}", lockKey, lockOwner.toString(StandardCharsets.UTF_8));
-
+        while (retryCount < maxRetries) {
             try {
-                // 락을 획득한 상태에서 작업 실행
-                return supplier.get();
+                log.info("Attempting to acquire lock: {} (attempt {}/{})", lockKey, retryCount + 1, maxRetries);
+                
+                // Create lease
+                leaseId = leaseClient.grant(ttlSeconds).get(5, TimeUnit.SECONDS).getID();
+                log.info("Lease granted with ID: {} for lock: {}", leaseId, lockKey);
+
+                // Try to acquire lock
+                CompletableFuture<LockResponse> lockFuture = lockClient.lock(lockKeyBS, leaseId);
+                LockResponse lockResponse = lockFuture.get(5, TimeUnit.SECONDS);
+                lockOwner = lockResponse.getKey();
+                log.info("Lock acquired: {} with key: {}", lockKey, lockOwner.toString(StandardCharsets.UTF_8));
+
+                try {
+                    // Execute the critical section
+                    return supplier.get();
+                } finally {
+                    // Release the lock
+                    if (lockOwner != null) {
+                        try {
+                            lockClient.unlock(lockOwner).get(5, TimeUnit.SECONDS);
+                            log.info("Lock released: {}", lockKey);
+                        } catch (Exception e) {
+                            log.error("Failed to release lock: {}", lockKey, e);
+                        }
+                    }
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.error("Interrupted while acquiring lock: {}", lockKey, e);
+                retryCount++;
+            } catch (ExecutionException | TimeoutException e) {
+                log.error("Error while acquiring lock: {} (attempt {}/{})", lockKey, retryCount + 1, maxRetries, e);
+                retryCount++;
             } finally {
-                // 락 해제
-                if (lockOwner != null) {
+                // Revoke lease
+                if (leaseId > 0) {
                     try {
-                        lockClient.unlock(lockOwner).get(5, TimeUnit.SECONDS);
-                        logger.info("Lock released: {}", lockKey);
+                        leaseClient.revoke(leaseId).get(5, TimeUnit.SECONDS);
+                        log.info("Lease revoked: {} for lock: {}", leaseId, lockKey);
                     } catch (Exception e) {
-                        logger.error("Failed to release lock: {}", lockKey, e);
+                        log.error("Failed to revoke lease: {} for lock: {}", leaseId, lockKey, e);
                     }
                 }
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            logger.error("Interrupted while acquiring lock: {}", lockKey, e);
-            throw new RuntimeException("Interrupted while acquiring lock: " + lockKey, e);
-        } catch (ExecutionException e) {
-            logger.error("Execution error while acquiring lock: {}", lockKey, e);
-            throw new RuntimeException("Execution error while acquiring lock: " + lockKey, e);
-        } catch (TimeoutException e) {
-            logger.error("Timeout while acquiring lock: {} after {} seconds", lockKey, timeout, e);
-            throw new RuntimeException("Timeout while acquiring lock: " + lockKey + " after " + timeout + " seconds", e);
-        } finally {
-            // 리스 해제
-            if (leaseId > 0) {
+
+            // Wait before retrying
+            if (retryCount < maxRetries) {
                 try {
-                    leaseClient.revoke(leaseId).get(5, TimeUnit.SECONDS);
-                    logger.info("Lease revoked: {} for lock: {}", leaseId, lockKey);
-                } catch (Exception e) {
-                    logger.error("Failed to revoke lease: {} for lock: {}", leaseId, lockKey, e);
+                    Thread.sleep(1000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
                 }
             }
         }
+
+        throw new RuntimeException("Failed to acquire lock after " + maxRetries + " attempts");
     }
 
     @Override
     public void destroy() {
         if (client != null) {
             client.close();
-            logger.info("Etcd client closed");
+            log.info("Etcd client closed");
         }
     }
 }

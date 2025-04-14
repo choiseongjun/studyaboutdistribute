@@ -1,21 +1,29 @@
 package com.seongjun.distributesystem.controller;
 
-import com.seongjun.distributesystem.service.OrderService;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.RestController;
+import com.seongjun.distributesystem.dto.OrderRequest;
+import com.seongjun.distributesystem.dto.OrderResponse;
+import com.seongjun.distributesystem.service.OrderProducer;
+import lombok.RequiredArgsConstructor;
+import org.springframework.web.bind.annotation.*;
 
 @RestController
+@RequiredArgsConstructor
+@RequestMapping("/api/orders")
 public class OrderController {
+    private final OrderProducer orderProducer;
 
-    private final OrderService orderService;
-
-    public OrderController(OrderService orderService) {
-        this.orderService = orderService;
+    @PostMapping
+    public OrderResponse createOrder(@RequestBody OrderRequest request) {
+        return orderProducer.queueOrder(request);
     }
 
-    @GetMapping("/orders/{orderId}/process")
-    public String processOrder(@PathVariable String orderId) {
-        return orderService.processOrder(orderId);
+    @GetMapping("/{orderId}/status")
+    public OrderResponse getOrderStatus(@PathVariable String orderId) {
+        // TODO: 주문 상태 조회 구현
+        return OrderResponse.builder()
+                .orderId(orderId)
+                .status("UNKNOWN")
+                .message("Status check not implemented yet")
+                .build();
     }
 }
