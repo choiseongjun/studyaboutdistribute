@@ -3,6 +3,7 @@ package com.seongjun.distributesystem.kafka;
 import com.seongjun.distributesystem.dto.OrderRequest;
 import com.seongjun.distributesystem.model.Order;
 import com.seongjun.distributesystem.repository.OrderRepository;
+import com.seongjun.distributesystem.service.OrderService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -30,10 +31,12 @@ import java.util.List;
 public class OrderConsumer {
     private static final Logger logger = LoggerFactory.getLogger(OrderConsumer.class);
     private final OrderRepository orderRepository;
+    private final OrderService orderService;
 
     @Autowired
-    public OrderConsumer(OrderRepository orderRepository) {
+    public OrderConsumer(OrderRepository orderRepository, OrderService orderService) {
         this.orderRepository = orderRepository;
+        this.orderService = orderService;
     }
 
     /**
@@ -65,5 +68,26 @@ public class OrderConsumer {
             
         orderRepository.saveAll(orderEntities);
         logger.info("Completed processing batch of {} orders", orders.size());
+    }
+
+    @KafkaListener(topics = "orders", groupId = "order-group")
+    public void consumeOrder(OrderRequest orderRequest) {
+        try {
+            logger.info("Processing order: {}", orderRequest.getOrderId());
+            
+            // 주문 상태 업데이트
+            Order order = orderRepository.findById(orderRequest.getOrderId())
+                .orElseThrow(() -> new RuntimeException("Order not found"));
+            
+            order.setStatus("COMPLETED");
+            orderRepository.save(order);
+            
+            // 주문 처리 완료 알림
+            orderService.completeOrder(orderRequest.getOrderId());
+            
+            logger.info("Order processed successfully: {}", orderRequest.getOrderId());
+        } catch (Exception e) {
+            logger.error("Failed to process order: {}", orderRequest.getOrderId(), e);
+        }
     }
 } 
