@@ -2,7 +2,9 @@ package com.seongjun.distributesystem.controller;
 
 import com.seongjun.distributesystem.dto.OrderRequest;
 import com.seongjun.distributesystem.dto.OrderResponse;
+import com.seongjun.distributesystem.model.Order;
 import com.seongjun.distributesystem.service.OrderService;
+import com.seongjun.distributesystem.repository.OrderRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -14,10 +16,12 @@ import java.util.Map;
 @RequestMapping("/api/orders")
 public class OrderController {
     private final OrderService orderService;
+    private final OrderRepository orderRepository;
 
     @Autowired
-    public OrderController(OrderService orderService) {
+    public OrderController(OrderService orderService, OrderRepository orderRepository) {
         this.orderService = orderService;
+        this.orderRepository = orderRepository;
     }
 
     @PostMapping
@@ -40,12 +44,17 @@ public class OrderController {
 
     @GetMapping("/{orderId}/status")
     public OrderResponse getOrderStatus(@PathVariable String orderId) {
-        // Implement order status check logic
-        return OrderResponse.builder()
-            .orderId(orderId)
-            .status("UNKNOWN")
-            .message("Status check not implemented")
-            .build();
+        return orderRepository.findById(orderId)
+            .map(order -> OrderResponse.builder()
+                .orderId(order.getOrderId())
+                .status(order.getStatus())
+                .message("Order status: " + order.getStatus())
+                .build())
+            .orElse(OrderResponse.builder()
+                .orderId(orderId)
+                .status("NOT_FOUND")
+                .message("Order not found")
+                .build());
     }
 
     @GetMapping("/{orderId}/position")

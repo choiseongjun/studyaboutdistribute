@@ -1,9 +1,11 @@
 package com.seongjun.distributesystem.config;
 
-import com.seongjun.distributesystem.utils.EtcdDistributedLock;
+import io.etcd.jetcd.Client;
+import io.etcd.jetcd.ClientBuilder;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import java.time.Duration;
 
 @Configuration
 public class EtcdConfig {
@@ -11,9 +13,14 @@ public class EtcdConfig {
     @Value("${etcd.endpoints:http://localhost:2379}")
     private String etcdEndpoints;
 
+    @Value("${etcd.connection.timeout:5000}")
+    private int connectionTimeout;
+
     @Bean
-    public EtcdDistributedLock etcdDistributedLock() {
-        // 직접 문자열을 전달하여 빈 생성
-        return new EtcdDistributedLock(etcdEndpoints);
+    public Client etcdClient() {
+        return Client.builder()
+                .endpoints(etcdEndpoints)
+                .connectTimeout(Duration.ofMillis(connectionTimeout))
+                .build();
     }
 }

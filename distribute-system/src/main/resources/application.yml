@@ -1,5 +1,12 @@
 etcd:
   endpoints: http://localhost:2379
+  connection:
+    timeout: 5000
+    retry:
+      max-attempts: 3
+      initial-backoff: 1000
+      max-backoff: 5000
+      multiplier: 2.0
   test:
     database:
       replace: none
@@ -66,3 +73,7 @@ spring:
       hibernate:
         format_sql: true
         dialect: org.hibernate.dialect.PostgreSQLDialect
+
+kafka:
+  topic:
+    orders: orders

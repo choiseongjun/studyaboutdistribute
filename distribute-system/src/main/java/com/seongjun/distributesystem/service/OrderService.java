@@ -5,9 +5,12 @@ import com.seongjun.distributesystem.dto.OrderResponse;
 import com.seongjun.distributesystem.kafka.OrderProducer;
 import com.seongjun.distributesystem.model.Order;
 import com.seongjun.distributesystem.repository.OrderRepository;
+import io.etcd.jetcd.Client;
+import io.etcd.jetcd.Lock;
+import io.etcd.jetcd.ByteSequence;
+import io.etcd.jetcd.lease.LeaseGrantResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.util.concurrent.atomic.AtomicInteger;
@@ -17,11 +20,13 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.List;
 import java.util.HashMap;
 import java.util.ArrayList;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public class OrderService {
     private static final Logger logger = LoggerFactory.getLogger(OrderService.class);
     private static final int MAX_FAILURES = 3;
+    private static final long LOCK_TIMEOUT = 5; // 5초
     private final AtomicInteger failureCount = new AtomicInteger(0);
     private volatile boolean circuitBreakerOpen = false;
     
@@ -30,11 +35,15 @@ public class OrderService {
     private final AtomicLong processedOrders = new AtomicLong(0);
     private final Map<String, Long> orderQueuePosition = new ConcurrentHashMap<>();
 
-    @Autowired
-    private OrderProducer orderProducer;
+    private final OrderProducer orderProducer;
+    private final OrderRepository orderRepository;
+    private final Client etcdClient;
 
-    @Autowired
-    private OrderRepository orderRepository;
+    public OrderService(OrderProducer orderProducer, OrderRepository orderRepository, Client etcdClient) {
+        this.orderProducer = orderProducer;
+        this.orderRepository = orderRepository;
+        this.etcdClient = etcdClient;
+    }
 
     public OrderResponse processOrder(OrderRequest orderRequest) {
         if (circuitBreakerOpen) {
@@ -46,42 +55,70 @@ public class OrderService {
                     .build();
         }
 
+        Lock lock = etcdClient.getLockClient();
+        String lockKey = "order-lock-" + orderRequest.getOrderId();
+        ByteSequence lockKeyBytes = ByteSequence.from(lockKey.getBytes());
+
         try {
-            // 대기열에 주문 추가
-            long queuePosition = totalOrders.incrementAndGet();
-            orderQueuePosition.put(orderRequest.getOrderId(), queuePosition);
+            // lease 생성
+            LeaseGrantResponse lease = etcdClient.getLeaseClient()
+                    .grant(LOCK_TIMEOUT)
+                    .get();
             
-            Order order = new Order();
-            order.setOrderId(orderRequest.getOrderId());
-            order.setProductId(orderRequest.getProductId());
-            order.setQuantity(orderRequest.getQuantity());
-            order.setUserId(orderRequest.getUserId());
-            order.setStatus("PROCESSING");
-            orderRepository.save(order);
+            // 분산락 획득 (lease ID 사용)
+            lock.lock(lockKeyBytes, lease.getID()).get();
+            
+            try {
+                // 대기열에 주문 추가
+                long queuePosition = totalOrders.incrementAndGet();
+                orderQueuePosition.put(orderRequest.getOrderId(), queuePosition);
+                
+                Order order = new Order();
+                order.setOrderId(orderRequest.getOrderId());
+                order.setProductId(orderRequest.getProductId());
+                order.setQuantity(orderRequest.getQuantity());
+                order.setUserId(orderRequest.getUserId());
+                order.setStatus("PROCESSING");
+                order.setSequence(queuePosition); // 주문 처리 순서 설정
+                orderRepository.save(order);
 
-            orderProducer.sendOrder(orderRequest);
+                orderProducer.sendOrder(orderRequest);
 
-            failureCount.set(0);
-            return OrderResponse.builder()
-                    .orderId(orderRequest.getOrderId())
-                    .status("ACCEPTED")
-                    .message("Order processed successfully. Queue position: " + queuePosition)
-                    .build();
+                failureCount.set(0);
+                return OrderResponse.builder()
+                        .orderId(orderRequest.getOrderId())
+                        .status("ACCEPTED")
+                        .message("Order processed successfully. Queue position: " + queuePosition)
+                        .build();
 
-        } catch (Exception e) {
-            int failures = failureCount.incrementAndGet();
-            logger.error("Failed to process order: {}, failure count: {}", orderRequest.getOrderId(), failures, e);
+            } catch (Exception e) {
+                int failures = failureCount.incrementAndGet();
+                logger.error("Failed to process order: {}, failure count: {}", orderRequest.getOrderId(), failures, e);
 
-            if (failures >= MAX_FAILURES) {
-                circuitBreakerOpen = true;
-                logger.warn("Circuit breaker opened after {} failures", failures);
+                if (failures >= MAX_FAILURES) {
+                    circuitBreakerOpen = true;
+                    logger.warn("Circuit breaker opened after {} failures", failures);
+                }
+
+                return OrderResponse.builder()
+                        .orderId(orderRequest.getOrderId())
+                        .status("FAILED")
+                        .message("Failed to process order: " + e.getMessage())
+                        .build();
             }
-
+        } catch (Exception e) {
+            logger.error("Failed to acquire lock for order: {}", orderRequest.getOrderId(), e);
             return OrderResponse.builder()
                     .orderId(orderRequest.getOrderId())
                     .status("FAILED")
-                    .message("Failed to process order: " + e.getMessage())
+                    .message("Failed to acquire lock: " + e.getMessage())
                     .build();
+        } finally {
+            try {
+                lock.unlock(lockKeyBytes).get();
+            } catch (Exception e) {
+                logger.error("Failed to release lock for order: {}", orderRequest.getOrderId(), e);
+            }
         }
     }
 
@@ -108,16 +145,41 @@ public class OrderService {
      * @return 대기열 위치 정보 (대기 중인 주문 수, 예상 대기 시간)
      */
     public Map<String, Object> getQueuePosition(String orderId) {
-        long pendingCount = orderRepository.countByStatus("PENDING");
-        long processingCount = orderRepository.countByStatus("PROCESSING");
+        // 현재 주문의 상태 확인
+        Order currentOrder = orderRepository.findById(orderId)
+            .orElseThrow(() -> new RuntimeException("Order not found"));
+        
+        // 전체 주문 수와 처리된 주문 수 계산
+        long totalOrdersCount = totalOrders.get();
+        long processedOrdersCount = processedOrders.get();
+        long pendingOrdersCount = totalOrdersCount - processedOrdersCount;
+        
+        // 현재 주문의 대기열 위치 계산
+        Long currentPosition = orderQueuePosition.get(orderId);
+        long queuePosition;
+        
+        if (currentPosition != null) {
+            // 주문이 아직 처리 중인 경우
+            queuePosition = currentPosition;
+        } else if ("COMPLETED".equals(currentOrder.getStatus())) {
+            // 주문이 완료된 경우 - sequence 번호 사용
+            queuePosition = currentOrder.getSequence();
+        } else {
+            // 주문이 대기 중인 경우
+            queuePosition = pendingOrdersCount + 1;
+        }
         
         // 평균 처리 시간이 1초라고 가정
-        long estimatedWaitTime = (pendingCount + processingCount) * 1000;
+        long estimatedWaitTime = (pendingOrdersCount > 0) ? pendingOrdersCount * 1000 : 0;
         
         Map<String, Object> positionInfo = new HashMap<>();
         positionInfo.put("orderId", orderId);
-        positionInfo.put("pendingOrders", pendingCount);
-        positionInfo.put("processingOrders", processingCount);
+        positionInfo.put("currentStatus", currentOrder.getStatus());
+        positionInfo.put("queuePosition", queuePosition);
+        positionInfo.put("pendingOrders", pendingOrdersCount);
+        positionInfo.put("processingOrders", orderRepository.countByStatus("PROCESSING"));
+        positionInfo.put("completedOrders", processedOrdersCount);
+        positionInfo.put("totalOrders", totalOrdersCount);
         positionInfo.put("estimatedWaitTime", estimatedWaitTime);
         
         return positionInfo;
@@ -130,14 +192,26 @@ public class OrderService {
     public Map<String, Object> getQueueStatus() {
         Map<String, Object> statusInfo = new HashMap<>();
         
-        long pendingCount = orderRepository.countByStatus("PENDING");
-        long processingCount = orderRepository.countByStatus("PROCESSING");
-        long completedCount = orderRepository.countByStatus("COMPLETED");
+        // 전체 주문 수와 처리된 주문 수 계산
+        long totalOrdersCount = totalOrders.get();
+        long processedOrdersCount = processedOrders.get();
+        long pendingOrdersCount = totalOrdersCount - processedOrdersCount;
         
-        statusInfo.put("pendingOrders", pendingCount);
-        statusInfo.put("processingOrders", processingCount);
-        statusInfo.put("completedOrders", completedCount);
-        statusInfo.put("totalOrders", pendingCount + processingCount + completedCount);
+        // 데이터베이스에서 처리 중인 주문 수 확인
+        long processingOrdersCount = orderRepository.countByStatus("PROCESSING");
+        
+        // 대기 중인 주문 수는 전체 주문 수에서 처리된 주문 수를 뺀 값
+        // 단, 처리 중인 주문은 pendingOrdersCount에서 제외
+        long actualPendingOrdersCount = Math.max(0, pendingOrdersCount - processingOrdersCount);
+        
+        statusInfo.put("pendingOrders", actualPendingOrdersCount);
+        statusInfo.put("processingOrders", processingOrdersCount);
+        statusInfo.put("completedOrders", processedOrdersCount);
+        statusInfo.put("totalOrders", totalOrdersCount);
+        
+        // 평균 처리 시간이 1초라고 가정하여 예상 대기 시간 계산
+        long estimatedWaitTime = (actualPendingOrdersCount > 0) ? actualPendingOrdersCount * 1000 : 0;
+        statusInfo.put("estimatedWaitTime", estimatedWaitTime);
         
         return statusInfo;
     }
