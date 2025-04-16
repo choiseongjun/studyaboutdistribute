@@ -55,70 +55,60 @@ public class OrderService {
                     .build();
         }
 
-        Lock lock = etcdClient.getLockClient();
-        String lockKey = "order-lock-" + orderRequest.getOrderId();
-        ByteSequence lockKeyBytes = ByteSequence.from(lockKey.getBytes());
+        String orderKey = "order-" + orderRequest.getOrderId();
+        ByteSequence key = ByteSequence.from(orderKey.getBytes());
+        ByteSequence value = ByteSequence.from("PROCESSING".getBytes());
 
         try {
-            // lease 생성
-            LeaseGrantResponse lease = etcdClient.getLeaseClient()
-                    .grant(LOCK_TIMEOUT)
+            // etcd의 KV 클라이언트를 사용하여 원자적 연산 수행
+            // 1. 먼저 키가 존재하는지 확인
+            var getResponse = etcdClient.getKVClient()
+                    .get(key)
                     .get();
-            
-            // 분산락 획득 (lease ID 사용)
-            lock.lock(lockKeyBytes, lease.getID()).get();
-            
-            try {
-                // 대기열에 주문 추가
-                long queuePosition = totalOrders.incrementAndGet();
-                orderQueuePosition.put(orderRequest.getOrderId(), queuePosition);
-                
-                Order order = new Order();
-                order.setOrderId(orderRequest.getOrderId());
-                order.setProductId(orderRequest.getProductId());
-                order.setQuantity(orderRequest.getQuantity());
-                order.setUserId(orderRequest.getUserId());
-                order.setStatus("PROCESSING");
-                order.setSequence(queuePosition); // 주문 처리 순서 설정
-                orderRepository.save(order);
 
-                orderProducer.sendOrder(orderRequest);
-
-                failureCount.set(0);
+            if (!getResponse.getKvs().isEmpty()) {
+                logger.warn("Duplicate order ID detected: {}", orderRequest.getOrderId());
                 return OrderResponse.builder()
                         .orderId(orderRequest.getOrderId())
-                        .status("ACCEPTED")
-                        .message("Order processed successfully. Queue position: " + queuePosition)
-                        .build();
-
-            } catch (Exception e) {
-                int failures = failureCount.incrementAndGet();
-                logger.error("Failed to process order: {}, failure count: {}", orderRequest.getOrderId(), failures, e);
-
-                if (failures >= MAX_FAILURES) {
-                    circuitBreakerOpen = true;
-                    logger.warn("Circuit breaker opened after {} failures", failures);
-                }
-
-                return OrderResponse.builder()
-                        .orderId(orderRequest.getOrderId())
-                        .status("FAILED")
-                        .message("Failed to process order: " + e.getMessage())
+                        .status("REJECTED")
+                        .message("Duplicate order ID")
                         .build();
             }
+
+            // 2. 키가 존재하지 않으면 새로운 주문 생성
+            etcdClient.getKVClient()
+                    .put(key, value)
+                    .get();
+
+            // 대기열에 주문 추가
+            long queuePosition = totalOrders.incrementAndGet();
+            orderQueuePosition.put(orderRequest.getOrderId(), queuePosition);
+            
+            Order order = new Order();
+            order.setOrderId(orderRequest.getOrderId());
+            order.setProductId(orderRequest.getProductId());
+            order.setQuantity(orderRequest.getQuantity());
+            order.setUserId(orderRequest.getUserId());
+            order.setStatus("PROCESSING");
+            order.setSequence(queuePosition);
+            orderRepository.save(order);
+
+            orderProducer.sendOrder(orderRequest);
+
+            failureCount.set(0);
+            return OrderResponse.builder()
+                    .orderId(orderRequest.getOrderId())
+                    .status("ACCEPTED")
+                    .message("Order processed successfully. Queue position: " + queuePosition)
+                    .build();
+
         } catch (Exception e) {
-            logger.error("Failed to acquire lock for order: {}", orderRequest.getOrderId(), e);
+            logger.error("Failed to process order: {}", orderRequest.getOrderId(), e);
             return OrderResponse.builder()
                     .orderId(orderRequest.getOrderId())
                     .status("FAILED")
-                    .message("Failed to acquire lock: " + e.getMessage())
+                    .message("Failed to process order: " + e.getMessage())
                     .build();
-        } finally {
-            try {
-                lock.unlock(lockKeyBytes).get();
-            } catch (Exception e) {
-                logger.error("Failed to release lock for order: {}", orderRequest.getOrderId(), e);
-            }
         }
     }
 
