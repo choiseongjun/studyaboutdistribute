@@ -120,7 +120,7 @@ public class OrderQueueTest {
         List<CompletableFuture<OrderResponse>> futures = orders.stream()
             .map(order -> CompletableFuture.supplyAsync(() -> {
                 try {
-                    return orderController.createOrder(order);
+                    return orderController.createOrder(order).getBody();
                 } catch (Exception e) {
                     logger.error("Failed to create order: {}", order.getOrderId(), e);
                     throw new RuntimeException(e);
