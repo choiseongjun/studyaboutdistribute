@@ -5,6 +5,7 @@ import com.seongjun.distributesystem.dto.OrderResponse;
 import com.seongjun.distributesystem.kafka.OrderProducer;
 import com.seongjun.distributesystem.model.Order;
 import com.seongjun.distributesystem.repository.OrderRepository;
+import com.seongjun.distributesystem.circuitbreaker.CircuitBreaker;
 import io.etcd.jetcd.Client;
 import io.etcd.jetcd.Lock;
 import io.etcd.jetcd.ByteSequence;
@@ -25,10 +26,7 @@ import java.util.concurrent.TimeUnit;
 @Service
 public class OrderService {
     private static final Logger logger = LoggerFactory.getLogger(OrderService.class);
-    private static final int MAX_FAILURES = 3;
     private static final long LOCK_TIMEOUT = 5; // 5초
-    private final AtomicInteger failureCount = new AtomicInteger(0);
-    private volatile boolean circuitBreakerOpen = false;
     
     // 대기열 상태 추적을 위한 변수들
     private final AtomicLong totalOrders = new AtomicLong(0);
@@ -38,15 +36,17 @@ public class OrderService {
     private final OrderProducer orderProducer;
     private final OrderRepository orderRepository;
     private final Client etcdClient;
+    private final CircuitBreaker circuitBreaker;
 
-    public OrderService(OrderProducer orderProducer, OrderRepository orderRepository, Client etcdClient) {
+    public OrderService(OrderProducer orderProducer, OrderRepository orderRepository, Client etcdClient, CircuitBreaker circuitBreaker) {
         this.orderProducer = orderProducer;
         this.orderRepository = orderRepository;
         this.etcdClient = etcdClient;
+        this.circuitBreaker = circuitBreaker;
     }
 
     public OrderResponse processOrder(OrderRequest orderRequest) {
-        if (circuitBreakerOpen) {
+        if (circuitBreaker.isOpen()) {
             logger.warn("Circuit breaker is open, rejecting request for order: {}", orderRequest.getOrderId());
             return OrderResponse.builder()
                     .orderId(orderRequest.getOrderId())
@@ -95,7 +95,7 @@ public class OrderService {
 
             orderProducer.sendOrder(orderRequest);
 
-            failureCount.set(0);
+            circuitBreaker.resetFailureCount();
             return OrderResponse.builder()
                     .orderId(orderRequest.getOrderId())
                     .status("ACCEPTED")
@@ -104,6 +104,7 @@ public class OrderService {
 
         } catch (Exception e) {
             logger.error("Failed to process order: {}", orderRequest.getOrderId(), e);
+            circuitBreaker.recordFailure();
             return OrderResponse.builder()
                     .orderId(orderRequest.getOrderId())
                     .status("FAILED")
