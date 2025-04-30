@@ -17,10 +17,7 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.kafka.core.KafkaTemplate;
 
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -47,7 +44,7 @@ public class OrderServiceCircuitBreakerTest {
     }
 
     @Test
-    void testCircuitBreakerWithConcurrentFailures() throws InterruptedException {
+    void testCircuitBreakerWithConcurrentFailures() throws InterruptedException, ExecutionException {
         // 첫 3번의 호출은 실패하도록 설정
         OrderRequest request = new OrderRequest();
         request.setOrderId("test-order-123");
@@ -120,7 +117,7 @@ public class OrderServiceCircuitBreakerTest {
     }
 
     @Test
-    void testCircuitBreakerRecovery() throws InterruptedException {
+    void testCircuitBreakerRecovery() throws InterruptedException, ExecutionException {
         OrderRequest request = new OrderRequest();
         request.setOrderId("recovery-test-order");
         
@@ -167,7 +164,7 @@ public class OrderServiceCircuitBreakerTest {
     }
 
     @Test
-    void testCircuitBreakerWithDifferentOrders() throws InterruptedException {
+    void testCircuitBreakerWithDifferentOrders() throws InterruptedException, ExecutionException {
         // 모든 요청이 성공하도록 설정
         when(orderService.processOrder(any(OrderRequest.class)))
             .thenAnswer(invocation -> {

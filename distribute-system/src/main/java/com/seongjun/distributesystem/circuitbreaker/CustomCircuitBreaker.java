@@ -16,8 +16,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * 3. 자동 복구 메커니즘
  */
 @Component
-public class CircuitBreaker {
-    private static final Logger logger = LoggerFactory.getLogger(CircuitBreaker.class);
+public class CustomCircuitBreaker {
+    private static final Logger logger = LoggerFactory.getLogger(CustomCircuitBreaker.class);
     private static final int MAX_FAILURES = 3;
     private static final long RESET_TIMEOUT = 30; // 30초
 

@@ -33,6 +33,15 @@ dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-validation'
 	implementation 'org.postgresql:postgresql'
 	
+	// Resilience4j for Spring Boot 3.x
+	implementation 'io.github.resilience4j:resilience4j-spring-boot3:2.1.0'
+	implementation 'io.github.resilience4j:resilience4j-circuitbreaker:2.1.0'
+	implementation 'io.github.resilience4j:resilience4j-retry:2.1.0'
+	implementation 'io.github.resilience4j:resilience4j-ratelimiter:2.1.0'
+	implementation 'io.github.resilience4j:resilience4j-bulkhead:2.1.0'
+	implementation 'io.github.resilience4j:resilience4j-cache:2.1.0'
+	implementation 'io.github.resilience4j:resilience4j-timelimiter:2.1.0'
+
 	annotationProcessor 'org.projectlombok:lombok'
 	
 	testImplementation 'org.springframework.boot:spring-boot-starter-test'

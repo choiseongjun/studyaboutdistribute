@@ -1,6 +1,6 @@
 package com.seongjun.distributesystem;
 
-import com.seongjun.distributesystem.circuitbreaker.CircuitBreaker;
+import com.seongjun.distributesystem.circuitbreaker.CustomCircuitBreaker;
 import com.seongjun.distributesystem.dto.OrderRequest;
 import com.seongjun.distributesystem.dto.OrderResponse;
 import com.seongjun.distributesystem.service.OrderService;
@@ -31,7 +31,7 @@ public class CircuitBreakerTest {
     private static final Logger logger = LoggerFactory.getLogger(CircuitBreakerTest.class);
 
     @Autowired
-    private CircuitBreaker circuitBreaker;
+    private CustomCircuitBreaker customCircuitBreaker;
 
     @Autowired
     private OrderService orderService;
@@ -39,7 +39,7 @@ public class CircuitBreakerTest {
     @BeforeEach
     void setUp() {
         // 테스트 시작 전 서킷 브레이커 초기화
-        circuitBreaker.resetFailureCount();
+        customCircuitBreaker.resetFailureCount();
     }
 
     /**
@@ -48,18 +48,18 @@ public class CircuitBreakerTest {
     @Test
     void testCircuitBreakerActivation() {
         // 초기 상태 확인
-        assertFalse(circuitBreaker.isOpen());
-        assertEquals(0, circuitBreaker.getFailureCount());
+        assertFalse(customCircuitBreaker.isOpen());
+        assertEquals(0, customCircuitBreaker.getFailureCount());
 
         // 연속적으로 3번의 실패 발생
         for (int i = 0; i < 3; i++) {
-            circuitBreaker.recordFailure();
+            customCircuitBreaker.recordFailure();
             logger.info("Failure {} recorded", i + 1);
         }
 
         // 서킷 브레이커가 열렸는지 확인
-        assertTrue(circuitBreaker.isOpen());
-        assertEquals(3, circuitBreaker.getFailureCount());
+        assertTrue(customCircuitBreaker.isOpen());
+        assertEquals(3, customCircuitBreaker.getFailureCount());
         logger.info("Circuit breaker is open after 3 failures");
     }
 
@@ -70,18 +70,18 @@ public class CircuitBreakerTest {
     void testCircuitBreakerRecovery() throws InterruptedException {
         // 연속적으로 3번의 실패 발생
         for (int i = 0; i < 3; i++) {
-            circuitBreaker.recordFailure();
+            customCircuitBreaker.recordFailure();
         }
 
         // 서킷 브레이커가 열렸는지 확인
-        assertTrue(circuitBreaker.isOpen());
+        assertTrue(customCircuitBreaker.isOpen());
 
         // 31초 대기 (서킷 브레이커 리셋 타임아웃보다 약간 더 긴 시간)
         Thread.sleep(31000);
 
         // 서킷 브레이커가 닫혔는지 확인
-        assertFalse(circuitBreaker.isOpen());
-        assertEquals(0, circuitBreaker.getFailureCount());
+        assertFalse(customCircuitBreaker.isOpen());
+        assertEquals(0, customCircuitBreaker.getFailureCount());
         logger.info("Circuit breaker has recovered after timeout");
     }
 
@@ -92,20 +92,20 @@ public class CircuitBreakerTest {
     void testFailureCountReset() {
         // 2번의 실패 발생
         for (int i = 0; i < 2; i++) {
-            circuitBreaker.recordFailure();
+            customCircuitBreaker.recordFailure();
         }
 
         // 실패 카운트 확인
-        assertEquals(2, circuitBreaker.getFailureCount());
+        assertEquals(2, customCircuitBreaker.getFailureCount());
 
         // 실패 카운트 리셋
-        circuitBreaker.resetFailureCount();
-        assertEquals(0, circuitBreaker.getFailureCount());
+        customCircuitBreaker.resetFailureCount();
+        assertEquals(0, customCircuitBreaker.getFailureCount());
         logger.info("Failure count has been reset");
 
         // 다시 실패 발생
-        circuitBreaker.recordFailure();
-        assertEquals(1, circuitBreaker.getFailureCount());
+        customCircuitBreaker.recordFailure();
+        assertEquals(1, customCircuitBreaker.getFailureCount());
         logger.info("First failure after reset recorded");
     }
 } 

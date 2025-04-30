@@ -5,15 +5,19 @@ import com.seongjun.distributesystem.dto.OrderResponse;
 import com.seongjun.distributesystem.kafka.OrderProducer;
 import com.seongjun.distributesystem.model.Order;
 import com.seongjun.distributesystem.repository.OrderRepository;
-import com.seongjun.distributesystem.circuitbreaker.CircuitBreaker;
+import com.seongjun.distributesystem.circuitbreaker.CustomCircuitBreaker;
 import io.etcd.jetcd.Client;
 import io.etcd.jetcd.Lock;
 import io.etcd.jetcd.ByteSequence;
 import io.etcd.jetcd.lease.LeaseGrantResponse;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.github.resilience4j.retry.annotation.Retry;
+import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
@@ -27,25 +31,31 @@ import java.util.concurrent.TimeUnit;
 public class OrderService {
     private static final Logger logger = LoggerFactory.getLogger(OrderService.class);
     private static final long LOCK_TIMEOUT = 5; // 5초
+    private static final int MAX_CONCURRENT_ORDERS = 100; // 동시 처리 가능한 최대 주문 수
+    private static final int QUEUE_THRESHOLD = 80; // 대기열 시작 임계값
     
     // 대기열 상태 추적을 위한 변수들
     private final AtomicLong totalOrders = new AtomicLong(0);
     private final AtomicLong processedOrders = new AtomicLong(0);
+    private final AtomicInteger currentProcessingOrders = new AtomicInteger(0);
     private final Map<String, Long> orderQueuePosition = new ConcurrentHashMap<>();
 
     private final OrderProducer orderProducer;
     private final OrderRepository orderRepository;
     private final Client etcdClient;
-    private final CircuitBreaker circuitBreaker;
+    private final CustomCircuitBreaker circuitBreaker;
 
-    public OrderService(OrderProducer orderProducer, OrderRepository orderRepository, Client etcdClient, CircuitBreaker circuitBreaker) {
+    public OrderService(OrderProducer orderProducer, OrderRepository orderRepository, Client etcdClient, CustomCircuitBreaker circuitBreaker) {
         this.orderProducer = orderProducer;
         this.orderRepository = orderRepository;
         this.etcdClient = etcdClient;
         this.circuitBreaker = circuitBreaker;
     }
 
-    public OrderResponse processOrder(OrderRequest orderRequest) {
+    @CircuitBreaker(name = "orderService", fallbackMethod = "processOrderFallback")
+    @Retry(name = "orderService", fallbackMethod = "processOrderFallback")
+    @RateLimiter(name = "orderService")
+    public OrderResponse processOrder(OrderRequest orderRequest) throws ExecutionException, InterruptedException {
         if (circuitBreaker.isOpen()) {
             logger.warn("Circuit breaker is open, rejecting request for order: {}", orderRequest.getOrderId());
             return OrderResponse.builder()
@@ -80,9 +90,19 @@ public class OrderService {
                     .put(key, value)
                     .get();
 
-            // 대기열에 주문 추가
-            long queuePosition = totalOrders.incrementAndGet();
-            orderQueuePosition.put(orderRequest.getOrderId(), queuePosition);
+            // 현재 처리 중인 주문 수 확인
+            int currentOrders = currentProcessingOrders.get();
+            long queuePosition = -1;
+
+            // 처리 중인 주문이 임계값을 초과하면 대기열에 추가
+            if (currentOrders >= QUEUE_THRESHOLD) {
+                queuePosition = totalOrders.incrementAndGet();
+                orderQueuePosition.put(orderRequest.getOrderId(), queuePosition);
+                logger.info("Order {} added to queue at position {}", orderRequest.getOrderId(), queuePosition);
+            }
+
+            // 처리 중인 주문 수 증가
+            currentProcessingOrders.incrementAndGet();
             
             Order order = new Order();
             order.setOrderId(orderRequest.getOrderId());
@@ -99,23 +119,34 @@ public class OrderService {
             return OrderResponse.builder()
                     .orderId(orderRequest.getOrderId())
                     .status("ACCEPTED")
-                    .message("Order processed successfully. Queue position: " + queuePosition)
+                    .message(queuePosition > 0 ? 
+                            "Order processed successfully. Queue position: " + queuePosition :
+                            "Order processed successfully")
                     .build();
 
         } catch (Exception e) {
             logger.error("Failed to process order: {}", orderRequest.getOrderId(), e);
             circuitBreaker.recordFailure();
-            return OrderResponse.builder()
-                    .orderId(orderRequest.getOrderId())
-                    .status("FAILED")
-                    .message("Failed to process order: " + e.getMessage())
-                    .build();
+            throw e;
         }
+    }
+
+    /**
+     * 주문 처리 실패 시 폴백 메서드
+     */
+    private OrderResponse processOrderFallback(OrderRequest orderRequest, Exception e) {
+        logger.error("Fallback executed for order: {}, error: {}", orderRequest.getOrderId(), e.getMessage());
+        return OrderResponse.builder()
+                .orderId(orderRequest.getOrderId())
+                .status("FAILED")
+                .message("Service temporarily unavailable. Please try again later.")
+                .build();
     }
 
     // 주문 처리 완료 시 호출되는 메서드
     public void completeOrder(String orderId) {
         processedOrders.incrementAndGet();
+        currentProcessingOrders.decrementAndGet();
         orderQueuePosition.remove(orderId);
         
         // 현재 대기열 상태 로깅
